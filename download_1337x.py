@@ -203,7 +203,7 @@ with sync_playwright() as p:
                 href = a.get_attribute("href")
                 if href:
                     detail_url = urljoin(url, href)
-                    title = a.inner_text(strip=True)
+                    title = a.inner_text()
                     row_text = a.evaluate("el => el.closest('tr')?.innerText || ''")
                     page_candidates.append({
                         "title": title,
