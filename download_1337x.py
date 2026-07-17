@@ -134,14 +134,19 @@ def parse_seeders(text: str) -> int:
     return 0
 
 
+MAX_TORRENT_SIZE_BYTES = 50 * 1024 * 1024 * 1024
+
+
 def rank_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Rank torrent candidates by resolution, file size, and seeders."""
+    """Rank torrent candidates by resolution, file size, and seeders, while filtering oversized files."""
     scored = []
     for candidate in candidates:
         text = (candidate.get("row_text") or "")
         resolution = parse_resolution(text)
         size_bytes = parse_size_bytes(text)
         seeders = parse_seeders(text)
+        if size_bytes and size_bytes > MAX_TORRENT_SIZE_BYTES:
+            continue
         score = (resolution * 1000000) + (size_bytes // 1024) + seeders
         scored.append({**candidate, "score": score, "resolution": resolution, "size_bytes": size_bytes, "seeders": seeders})
 
@@ -226,6 +231,11 @@ with sync_playwright() as p:
     
     ranked_candidates = rank_candidates(all_candidates)
     top_candidates = ranked_candidates[:limit]
+    if not top_candidates:
+        print("\n⚠️ No torrents under the 50 GB size limit were found.")
+        context.close()
+        shutil.rmtree(temp_profile.parent, ignore_errors=True)
+        sys.exit(0)
     print(f"\n🔍 Ranked {len(top_candidates)} best torrents to process")
     print(f"📝 Extracting magnet links...\n")
     
