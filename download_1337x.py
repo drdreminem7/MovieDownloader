@@ -4,6 +4,7 @@
 Usage: python3 download_1337x.py "movie name" [limit] [start_page]
 Example: python3 download_1337x.py "inception" 50 2
 """
+import re
 import shutil
 import sys
 import subprocess
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin
 
 import bencodepy
@@ -95,22 +97,74 @@ def make_temp_brave_profile(source: Path) -> Path:
     return temp_profile
 
 
+def parse_resolution(text: str) -> int:
+    """Return a numeric score for resolution so higher-quality torrents rank higher."""
+    lowered = text.lower()
+    if "2160p" in lowered or "4k" in lowered:
+        return 2160
+    if "1440p" in lowered:
+        return 1440
+    if "1080p" in lowered:
+        return 1080
+    if "720p" in lowered:
+        return 720
+    if "480p" in lowered:
+        return 480
+    if "360p" in lowered:
+        return 360
+    return 0
+
+
+def parse_size_bytes(text: str) -> float:
+    """Parse a size string like 2.2 GB or 700 MB into bytes."""
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)\s*(kb|mb|gb|tb)", text.lower())
+    if not match:
+        return 0.0
+    value = float(match.group(1))
+    unit = match.group(2)
+    multipliers = {"kb": 1024, "mb": 1024 * 1024, "gb": 1024 * 1024 * 1024, "tb": 1024 * 1024 * 1024 * 1024}
+    return value * multipliers[unit]
+
+
+def parse_seeders(text: str) -> int:
+    """Extract the seeder count from a text blob."""
+    match = re.search(r"seeders?\s*[:#]?\s*(\d+)", text.lower())
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def rank_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rank torrent candidates by resolution, file size, and seeders."""
+    scored = []
+    for candidate in candidates:
+        text = (candidate.get("row_text") or "")
+        resolution = parse_resolution(text)
+        size_bytes = parse_size_bytes(text)
+        seeders = parse_seeders(text)
+        score = (resolution * 1000000) + (size_bytes // 1024) + seeders
+        scored.append({**candidate, "score": score, "resolution": resolution, "size_bytes": size_bytes, "seeders": seeders})
+
+    scored.sort(key=lambda item: (-item["score"], item["title"].lower()))
+    return scored
+
+
 if len(sys.argv) < 2:
     print("Usage: python3 download_1337x.py 'search term' [limit] [start_page]")
     print("Examples:")
-    print("  python3 download_1337x.py 'interstellar'          # 20 from page 1")
-    print("  python3 download_1337x.py 'dune' 50       # 50 from page 1")
-    print("  python3 download_1337x.py 'inception' 50 2     # 50 starting from page 2")
+    print("  python3 download_1337x.py 'interstellar'          # top 3 from page 1")
+    print("  python3 download_1337x.py 'dune' 5       # top 5 from page 1")
+    print("  python3 download_1337x.py 'inception' 5 2     # top 5 starting from page 2")
     sys.exit(1)
 
 search_term = sys.argv[1]
-limit = int(sys.argv[2]) if len(sys.argv) > 2 else 20
+limit = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 start_page = int(sys.argv[3]) if len(sys.argv) > 3 else 1
 
 search_query = "+".join(search_term.split())
 
 print(f"🔍 Searching for: {search_term}")
-print(f"📍 Limit: {limit} torrents")
+print(f"📍 Downloading the top {limit} ranked torrents")
 print(f"📄 Starting from page: {start_page}\n")
 ensure_utorrent_save_path(TORRENTS_DIR)
 restart_utorrent_web()
@@ -131,33 +185,37 @@ with sync_playwright() as p:
     
     print("📱 Opening Brave with your profile...\n")
     
-    all_links = []
+    all_candidates = []
     current_page = start_page
     
-    # Loop through pages until we have enough torrents
-    while len(all_links) < limit:
+    # Loop through pages until we have enough candidates to rank
+    while len(all_candidates) < max(limit * 3, 12):
         url = f"https://www.1337x.to/search/{search_query}/{current_page}/"
         print(f"📄 Scraping page {current_page}...")
         
         try:
             page.goto(url, wait_until="networkidle", timeout=120000)
-            
-            # Wait for torrent links to appear
             time.sleep(2)
             page.wait_for_selector("a[href^='/torrent/']", timeout=30000)
             
-            # Extract detail links from this page
-            page_links = []
+            page_candidates = []
             for a in page.query_selector_all("a[href^='/torrent/']"):
                 href = a.get_attribute("href")
                 if href:
-                    page_links.append(urljoin(url, href))
+                    detail_url = urljoin(url, href)
+                    title = a.inner_text(strip=True)
+                    row_text = a.evaluate("el => el.closest('tr')?.innerText || ''")
+                    page_candidates.append({
+                        "title": title,
+                        "row_text": row_text,
+                        "detail_url": detail_url,
+                    })
             
-            page_links = list(dict.fromkeys(page_links))  # Remove duplicates
-            all_links.extend(page_links)
-            print(f"   Found {len(page_links)} torrents (total: {len(all_links)})")
+            page_candidates = list({item["detail_url"]: item for item in page_candidates}.values())
+            all_candidates.extend(page_candidates)
+            print(f"   Found {len(page_candidates)} torrents (total: {len(all_candidates)})")
             
-            if len(page_links) == 0:
+            if len(page_candidates) == 0:
                 print(f"   No more torrents found. Stopping.")
                 break
                 
@@ -166,16 +224,16 @@ with sync_playwright() as p:
             print(f"   Error on page {current_page}: {e}")
             break
     
-    # Trim to exact limit
-    all_links = all_links[:limit]
-    print(f"\n🔍 Total torrents to process: {len(all_links)}")
+    ranked_candidates = rank_candidates(all_candidates)
+    top_candidates = ranked_candidates[:limit]
+    print(f"\n🔍 Ranked {len(top_candidates)} best torrents to process")
     print(f"📝 Extracting magnet links...\n")
     
     magnets = []
-    for i, dlink in enumerate(all_links, start=1):
-        print(f"[{i}/{len(all_links)}] Extracting magnet...")
+    for i, candidate in enumerate(top_candidates, start=1):
+        print(f"[{i}/{len(top_candidates)}] Extracting magnet for {candidate['title']}...")
         try:
-            page.goto(dlink, wait_until="domcontentloaded", timeout=60000)
+            page.goto(candidate["detail_url"], wait_until="domcontentloaded", timeout=60000)
             magnet_elem = page.query_selector("a[href^='magnet:']")
             if magnet_elem:
                 magnet = magnet_elem.get_attribute("href")
