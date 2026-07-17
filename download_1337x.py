@@ -2,7 +2,7 @@
 """
 1337x Movie Downloader - Extract magnets by search term with pagination.
 Usage: python3 download_1337x.py "movie name" [limit] [start_page]
-Example: python3 download_1337x.py "autumn falls" 50 2
+Example: python3 download_1337x.py "inception" 50 2
 """
 import shutil
 import sys
